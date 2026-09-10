@@ -479,8 +479,13 @@ async def _run_add_job(name: str, email: str, password: str, totp: str):
         JOBS[name] = {**JOBS[name], "status": "failed", "error": str(e)[:300]}
 
 
-async def _run_cookie_job(name: str, raw_cookie: str):
-    """Parses, validates, and injects pasted cookies into a fresh profile."""
+async def _run_cookie_job(name: str, raw_cookie: str, existing: bool = False):
+    """Parses, validates, injects pasted cookies, and keeps the original text.
+
+    `existing=True` updates the session of an account that is already in the
+    pool (profile is reused); the original cookie is (re)stored either way so
+    generate/resume/verify can re-inject it later.
+    """
     JOBS[name] = {"kind": "cookie", "status": "running", "error": "",
                   "started_at": time.time(), "summary": ""}
     try:
@@ -494,16 +499,21 @@ async def _run_cookie_job(name: str, raw_cookie: str):
         if count <= 0:
             raise ValueError("No cookies persisted into browser profile")
         warnings = ", ".join(check["warnings"]) or "none"
-        pool.register_account(name, f"cookie:{len(parsed['cookies'])}",
-                              note=f"Added via cookie import; warnings: {warnings}")
-        # Login state unknown until user verifies; keep login_ok NULL -> Unverified.
+        # Keep the original paste (any of the 3 formats) for later re-injection.
+        pool.set_raw_cookie(name, raw_cookie)
+        if existing:
+            pool.set_note(name, f"Cookie updated via import; warnings: {warnings}")
+        else:
+            pool.register_account(name, f"cookie:{len(parsed['cookies'])}",
+                                  note=f"Added via cookie import; warnings: {warnings}")
+        # Session just changed; login state unknown until a Verify -> Unverified.
         pool._conn.execute(
-            "UPDATE accounts_meta SET login_checked_at=? WHERE name=?",
+            "UPDATE accounts_meta SET login_ok=NULL, login_checked_at=? WHERE name=?",
             (time.time(), name),
         )
         pool._conn.commit()
         summary = (f"{len(parsed['cookies'])} cookies injected ({parsed['format']}), "
-                   f"warnings: {warnings}")
+                   f"warnings: {warnings}, original cookie stored")
         JOBS[name] = {**JOBS[name], "status": "success", "summary": summary}
     except Exception as e:
         JOBS[name] = {**JOBS[name], "status": "failed", "error": str(e)[:300]}
@@ -525,16 +535,24 @@ async def admin_account_add(body: AccountAdd, x_admin_key: str | None = Header(d
 @app.post("/api/admin/cookies", status_code=202)
 async def admin_cookie_add(body: CookieAddRequest,
                            x_admin_key: str | None = Header(default=None)):
-    """Registers an account by pasting cookies (JSON / Netscape / header string)."""
+    """Registers or updates an account by pasting cookies (JSON / Netscape / header string).
+
+    An existing account is re-injected in place (session refresh) instead of
+    being rejected, so an expired session can be replaced without deleting the
+    profile. The original paste is stored for automatic re-injection later.
+    """
     _admin_auth(x_admin_key)
     if not NAME_RE.match(body.name):
         raise HTTPException(400, "invalid account name")
-    if body.name in pool.accounts:
-        raise HTTPException(409, "account exists")
+    existing = body.name in pool.accounts
+    if existing:
+        lock = pool._locks.get(body.name)
+        if lock and lock.locked():
+            raise HTTPException(409, "account is generating video, try again later")
     if JOBS.get(body.name, {}).get("status") == "running":
         raise HTTPException(409, "cookie job running")
-    asyncio.create_task(_run_cookie_job(body.name, body.cookie))
-    return {"ok": True, "job": "running"}
+    asyncio.create_task(_run_cookie_job(body.name, body.cookie, existing=existing))
+    return {"ok": True, "job": "running", "updated": existing}
 
 
 @app.get("/api/admin/jobs")

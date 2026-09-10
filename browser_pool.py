@@ -26,12 +26,12 @@ class AllAccountsQuotaBlockedError(RuntimeError):
 
 
 class BrowserPool:
-    def __init__(self, accounts_dir: str = "accounts", db_path: str = "pool_usage.db",
+    def __init__(self, accounts_dir: str = "accounts", db_path: str = None,
                  max_concurrency: int = 1):
         self.accounts_dir = Path(accounts_dir)
         self.semaphore = asyncio.Semaphore(max_concurrency)
         self._locks: dict[str, asyncio.Lock] = {}
-        self._conn = sqlite3.connect(db_path, check_same_thread=False)
+        self._conn = sqlite3.connect(db_path or config.POOL_DB_PATH, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute(
             "CREATE TABLE IF NOT EXISTS usage (account TEXT, day TEXT, used INTEGER, "
@@ -54,7 +54,8 @@ class BrowserPool:
                 quota_blocked_until REAL DEFAULT 0,
                 quota_reason TEXT DEFAULT '',
                 credit_balance INTEGER,
-                credit_checked_at REAL DEFAULT 0
+                credit_checked_at REAL DEFAULT 0,
+                raw_cookie TEXT DEFAULT ''
             )
             """
         )
@@ -68,6 +69,7 @@ class BrowserPool:
             ("quota_reason", "TEXT DEFAULT ''"),
             ("credit_balance", "INTEGER"),
             ("credit_checked_at", "REAL DEFAULT 0"),
+            ("raw_cookie", "TEXT DEFAULT ''"),
         ):
             try:
                 self._conn.execute(f"ALTER TABLE accounts_meta ADD COLUMN {column} {definition}")
@@ -183,6 +185,7 @@ class BrowserPool:
                 "quota_reason": m["quota_reason"] if m else "",
                 "credit_balance": m["credit_balance"] if m else None,
                 "credit_checked_at": m["credit_checked_at"] if m else 0,
+                "has_raw_cookie": bool(m and m["raw_cookie"]),
                 "used_today": used,
                 "limit": DAILY_LIMIT,
                 "remaining": max(0, DAILY_LIMIT - used),
@@ -222,6 +225,22 @@ class BrowserPool:
         self.set_email(name, email)
         if note:
             self.set_note(name, note)
+
+    def set_raw_cookie(self, name: str, raw: str):
+        """Persists the original pasted cookie text for later re-injection.
+
+        The raw text is kept exactly as imported (JSON array / Netscape /
+        header string) so every flow that launches this account's profile can
+        re-inject the session without asking the operator to paste it again.
+        """
+        self._ensure_meta(name)
+        self._conn.execute(
+            "UPDATE accounts_meta SET raw_cookie=? WHERE name=?", (raw or "", name))
+        self._conn.commit()
+
+    def get_raw_cookie(self, name: str) -> str:
+        row = self._meta(name)
+        return (row["raw_cookie"] or "") if row else ""
 
     def delete_account(self, name: str):
         lock = self._locks.get(name)

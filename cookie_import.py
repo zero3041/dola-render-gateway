@@ -13,11 +13,18 @@ from __future__ import annotations
 
 import json
 import re
+import sqlite3
 import time
 from http.cookies import SimpleCookie
 from pathlib import Path
 
-DOLA_DOMAIN = "dola.com"
+import config
+
+DOLA_HOST = "dola.com"
+# Domain-cookie form for patchright add_cookies: the leading dot makes the
+# cookie match every subdomain (www.dola.com, dola.com). Without it the cookie
+# is host-only and never sent to www.dola.com -> silent login failure.
+DOLA_DOMAIN = "." + DOLA_HOST
 REQUIRED = ("sessionid",)
 IMPORTANT_WARN = ("msToken", "s_v_web_id")
 
@@ -34,12 +41,18 @@ _NETSCAPE_LINE_RE = re.compile(
 def _belongs_to_dola(domain: str) -> bool:
     """True if a cookie domain is dola.com or a subdomain of it."""
     d = domain.strip().lstrip(".")
-    return d.lower() == DOLA_DOMAIN or d.lower().endswith("." + DOLA_DOMAIN)
+    return d.lower() == DOLA_HOST or d.lower().endswith("." + DOLA_HOST)
 
 
 def _clean_domain(domain: str) -> str:
-    """Normalizes a cookie domain for patchright add_cookies (leading dot ok)."""
-    return domain.strip().lstrip(".")
+    """Normalizes a cookie domain for patchright add_cookies.
+
+    The leading dot is KEPT: it marks a domain cookie that matches every
+    subdomain (www.dola.com, dola.com). Stripping it makes the cookie
+    host-only for "dola.com", so the browser never sends it to
+    "www.dola.com" and the session silently fails (login overlay).
+    """
+    return domain.strip()
 
 
 # ---- Format-specific parsing ----
@@ -237,6 +250,49 @@ def normalize_to_add_cookie(c: dict) -> dict:
 def build_cookie_header(cookies: list[dict]) -> str:
     """Builds a `k=v; k2=v2` header string for debugging/diagnostics."""
     return "; ".join(f"{c['name']}={c['value']}" for c in cookies)
+
+
+def load_raw_cookie(account: str, db_path: str | None = None) -> str:
+    """Reads the stored original cookie text for an account (best-effort).
+
+    Returns "" when the pool database, table, column, or row is missing so
+    callers can treat "no raw cookie" and "not imported via cookie" the same.
+    """
+    try:
+        conn = sqlite3.connect(db_path or config.POOL_DB_PATH)
+        try:
+            row = conn.execute(
+                "SELECT raw_cookie FROM accounts_meta WHERE name=?", (account,)
+            ).fetchone()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return ""
+    return (row[0] or "") if row else ""
+
+
+async def ensure_session_cookies(context, account: str,
+                                 db_path: str | None = None) -> int:
+    """Injects the stored original cookie when the profile has no session.
+
+    Called by every flow that launches an account profile (video generation,
+    resume, verify). A profile that already carries a `sessionid` is left
+    untouched, so a live/refreshed session is never overwritten by the older
+    stored copy. Returns the number of cookies injected (0 = nothing to do).
+    """
+    cookies = await context.cookies("https://www.dola.com")
+    if any(c.get("name") == "sessionid" and c.get("value") for c in cookies):
+        return 0
+    raw = load_raw_cookie(account, db_path)
+    if not raw:
+        return 0
+    parsed = parse_cookie_input(raw)
+    add = [normalize_to_add_cookie(c) for c in parsed["cookies"]]
+    if not add:
+        return 0
+    await context.add_cookies(add)
+    await context.cookies("https://www.dola.com")  # force persist
+    return len(add)
 
 
 async def inject_cookies_into_profile(account: str, cookie_dicts: list[dict],

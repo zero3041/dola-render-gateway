@@ -1,91 +1,53 @@
-"""Inject a dola.com cookie string into a new browser profile.
+"""Inject a dola.com cookie into a browser profile and keep the original.
 
 Usage:
-    python setup_cookie.py <account_name>
-    or read cookie from DOLA_COOKIE_STRING env var.
+    python setup_cookie.py <account_name> [cookie_file]
+    # or pass the cookie via env var DOLA_COOKIE_STRING
 
-The cookie string must be passed via env var DOLA_COOKIE_STRING to avoid
-command-line exposure. Accepts the raw browser Cookie header (`k=v; k2=v2`).
+Accepts all three browser-export formats (JSON array / Netscape file /
+`k=v; k2=v2` header string) through the same parser as the dashboard import.
+The original text is stored in the pool database so generate / resume / verify
+can re-inject it automatically if the profile loses its session.
 """
 import asyncio
 import os
 import sys
-import time
-from http.cookies import SimpleCookie
-from pathlib import Path
 
-from patchright.async_api import async_playwright
-
-from browser import LAUNCH_ARGS
-import config
-
-# Cookie string from a logged-in browser typically contains only name=value,
-# so no expires/secure flags survive copy-paste. Without an expires the browser
-# treats them as session cookies and evicts them on close, so we pin an expiry.
-_COOKIE_EXPIRE = int(time.time()) + 86400 * 365 * 3  # 3 years from now
-
-
-def parse_cookie_string(raw: str) -> list[dict]:
-    """Parse a `k=v; k2=v2; ...` cookie header into patchright add_cookies list."""
-    c = SimpleCookie()
-    try:
-        c.load(raw)
-    except Exception:
-        # SimpleCookie chokes on some bytes; fall back to manual split.
-        c = SimpleCookie()
-        for part in raw.split(";"):
-            if "=" in part:
-                k, v = part.strip().split("=", 1)
-                c[k.strip()] = v.strip()
-    result = []
-    for morsel in c.values():
-        result.append({
-            "name": morsel.key,
-            "value": morsel.value,
-            "domain": "dola.com",
-            "path": "/",
-            "expires": _COOKIE_EXPIRE,
-            "secure": True,  # dola.com is HTTPS; auth cookies must be Secure to be sent
-        })
-    return result
+import cookie_import
 
 
 async def main():
     account = sys.argv[1] if len(sys.argv) > 1 else "acc_cookie"
-    raw = os.getenv("DOLA_COOKIE_STRING", "").strip()
+    if len(sys.argv) > 2:
+        with open(sys.argv[2], encoding="utf-8-sig") as f:
+            raw = f.read()
+    else:
+        raw = os.getenv("DOLA_COOKIE_STRING", "")
+    raw = raw.strip()
     if not raw:
-        print("Please provide cookie via DOLA_COOKIE_STRING env var.", file=sys.stderr)
-        sys.exit(2)
-    cookies = parse_cookie_string(raw)
-    if not cookies:
-        print("No cookies parsed from input.", file=sys.stderr)
-        sys.exit(2)
-    required = {"sessionid", "msToken", "s_v_web_id"}
-    missing = required.difference(c["name"] for c in cookies)
-    if missing:
-        print(f"Missing required cookies: {missing}", file=sys.stderr)
+        print("Provide a cookie file argument or DOLA_COOKIE_STRING env var.",
+              file=sys.stderr)
         sys.exit(2)
 
-    profile_dir = Path("accounts") / account
-    profile_dir.mkdir(parents=True, exist_ok=True)
+    parsed = cookie_import.parse_cookie_input(raw)
+    check = cookie_import.validate_cookies(parsed["cookies"])
+    if not check["ok"]:
+        print(f"Invalid cookie input: {'; '.join(check['errors'])}", file=sys.stderr)
+        sys.exit(2)
+    for warning in check["warnings"]:
+        print(f"warning: {warning}", file=sys.stderr)
 
-    async with async_playwright() as p:
-        context = await p.chromium.launch_persistent_context(
-            str(profile_dir),
-            headless=True,
-            args=LAUNCH_ARGS,
-            locale="ja-JP",
-            timezone_id="Asia/Tokyo",
-            proxy={"server": config.PROXY} if config.PROXY else None,
-        )
-        try:
-            await context.add_cookies(cookies)
-            print(f"[{account}] Injected {len(cookies)} cookies into {profile_dir}")
-            cookies_after = await context.cookies("https://www.dola.com")
-            print(f"[{account}] Cookies persisted: {len(cookies_after)}")
-        finally:
-            await context.close()
-    print(f"[{account}] Profile ready at accounts/{account}")
+    count = await cookie_import.inject_cookies_into_profile(account, parsed["cookies"])
+    if count <= 0:
+        print("No cookies persisted into browser profile.", file=sys.stderr)
+        sys.exit(2)
+
+    # Keep the original paste for automatic re-injection in pool flows.
+    from browser_pool import BrowserPool
+    BrowserPool().set_raw_cookie(account, raw)
+
+    print(f"[{account}] Injected {len(parsed['cookies'])} cookie(s) "
+          f"({parsed['format']}) into accounts/{account}; original cookie stored")
 
 
 if __name__ == "__main__":

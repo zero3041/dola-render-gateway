@@ -11,3 +11,9 @@
 # Validation is lenient: only sessionid is strictly required. msToken and
 # s_v_web_id are optional (warnings only) — the runtime treats msToken as
 # optional and continues if it is missing.
+#
+# The original paste is stored verbatim in pool_usage.db
+# (accounts_meta.raw_cookie). If a profile loses its session, generate /
+# resume / verify re-inject the stored original automatically instead of
+# failing with "session expired". Re-importing for an existing account
+# refreshes its session in place (no need to delete the profile).

@@ -38,6 +38,9 @@ VIDEO_TIMEOUT = int(os.getenv("DOLA_VIDEO_TIMEOUT", "300"))
 # SQLite database path
 DB_PATH = os.getenv("DOLA_DB_PATH", "tasks.db")
 
+# Account pool database path (accounts_meta + usage; stores raw cookies for re-injection)
+POOL_DB_PATH = os.getenv("DOLA_POOL_DB_PATH", "pool_usage.db")
+
 # Video download storage directory (served statically by FastAPI)
 DOWNLOAD_DIR = os.getenv("DOLA_DOWNLOAD_DIR", "downloads")
 

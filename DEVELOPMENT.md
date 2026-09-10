@@ -32,3 +32,12 @@ The system operates across three tiers:
 ## 4. Verification Handling
 
 - Handles verification challenges using automated visual template alignment to ensure reliable background execution.
+
+---
+
+## 5. Cookie Import & Session Re-injection
+
+- Import accepts three browser-export formats through `cookie_import.parse_cookie_input`: JSON array (Cookie-Editor), Netscape file, and `k=v; k2=v2` header string. Only `sessionid` is required; `msToken` / `s_v_web_id` are warnings.
+- The original paste is stored verbatim in `pool_usage.db` (`accounts_meta.raw_cookie`) by both entry points: the dashboard (`POST /api/admin/cookies` → `_run_cookie_job`) and the CLI (`setup_cookie.py <account> [file]` or `DOLA_COOKIE_STRING`).
+- Re-importing for an existing account refreshes the session in place (profile is reused, `login_ok` resets to Unverified); it is not rejected.
+- `browser.launch_account_context` calls `cookie_import.ensure_session_cookies` on every launch, so generate / resume / verify re-inject the stored original when the profile has no `sessionid`. A profile that already holds a live session is never overwritten.
