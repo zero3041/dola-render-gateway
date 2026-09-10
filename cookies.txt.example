@@ -1,4 +1,13 @@
-# One dola.com account cookie per line (must include msToken=, s_v_web_id=, sessionid=)
+# One dola.com account cookie per line (must include sessionid=)
 # How to obtain: Log into https://www.dola.com -> F12 -> Network -> any request -> Headers -> Cookie
 # Lines starting with # are comments. Example (placeholder, replace with real cookie):
-# msToken=xxxx; s_v_web_id=ver_xxxx; sessionid=xxxx; passport_auth_status=xxxx; sid_guard=xxxx
+# sessionid=xxxx; msToken=xxxx; s_v_web_id=ver_xxxx; sid_guard=xxxx; passport_auth_status=xxxx
+#
+# The dashboard "+ Add Cookie" panel also accepts pasted browser exports directly:
+#   - JSON array  (Cookie-Editor / EditThisCookie export)
+#   - Netscape cookie file  (curl / Cookies.txt format)
+#   - header string  (k=v; k2=v2 from DevTools -> Copy -> Copy as cURL / Cookie)
+#
+# Validation is lenient: only sessionid is strictly required. msToken and
+# s_v_web_id are optional (warnings only) — the runtime treats msToken as
+# optional and continues if it is missing.

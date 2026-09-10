@@ -212,6 +212,17 @@ class BrowserPool:
             "UPDATE accounts_meta SET note=? WHERE name=?", (note, name))
         self._conn.commit()
 
+    def register_account(self, name: str, email: str, note: str = ""):
+        """Registers an account that was created out-of-band (e.g. cookie import).
+
+        Ensures metadata row exists, stores a label in email, and keeps
+        login_ok as NULL so the account shows as Unverified until a Verify.
+        """
+        self._ensure_meta(name)
+        self.set_email(name, email)
+        if note:
+            self.set_note(name, note)
+
     def delete_account(self, name: str):
         lock = self._locks.get(name)
         if lock and lock.locked():

@@ -23,6 +23,7 @@ from pydantic import BaseModel, Field
 
 import config
 from add_account import add_account_flow
+import cookie_import
 from browser_pool import AllAccountsLimitedError, AllAccountsQuotaBlockedError, BrowserPool
 from media import download_reference_images, validate_reference_urls
 from store import PendingTaskLimitExceeded, TaskQuotaExceeded, TaskStore
@@ -347,6 +348,19 @@ async def get_video(task_id: str, authorization: str | None = Header(default=Non
     )
 
 
+@app.get("/v1/models")
+async def list_models(authorization: str | None = Header(default=None)):
+    """OpenAI-compatible model list."""
+    _auth(authorization)
+    return {
+        "object": "list",
+        "data": [
+            {"id": "seedance-2.0", "object": "model", "created": 0, "owned_by": "dola"},
+            {"id": "seedance-2.5", "object": "model", "created": 0, "owned_by": "dola"},
+        ],
+    }
+
+
 @app.get("/health")
 async def health():
     return {
@@ -376,6 +390,11 @@ class AccountAdd(BaseModel):
     email: str
     password: str
     totp: str
+
+
+class CookieAddRequest(BaseModel):
+    name: str
+    cookie: str
 
 
 class KeyCreate(BaseModel):
@@ -460,6 +479,36 @@ async def _run_add_job(name: str, email: str, password: str, totp: str):
         JOBS[name] = {**JOBS[name], "status": "failed", "error": str(e)[:300]}
 
 
+async def _run_cookie_job(name: str, raw_cookie: str):
+    """Parses, validates, and injects pasted cookies into a fresh profile."""
+    JOBS[name] = {"kind": "cookie", "status": "running", "error": "",
+                  "started_at": time.time(), "summary": ""}
+    try:
+        parsed = cookie_import.parse_cookie_input(raw_cookie)
+        check = cookie_import.validate_cookies(parsed["cookies"])
+        if not check["ok"]:
+            raise ValueError("; ".join(check["errors"]))
+        # Up-front (syntax) validation failure fails fast; missing optional
+        # cookies only surface as warnings and are allowed through.
+        count = await cookie_import.inject_cookies_into_profile(name, parsed["cookies"])
+        if count <= 0:
+            raise ValueError("No cookies persisted into browser profile")
+        warnings = ", ".join(check["warnings"]) or "none"
+        pool.register_account(name, f"cookie:{len(parsed['cookies'])}",
+                              note=f"Added via cookie import; warnings: {warnings}")
+        # Login state unknown until user verifies; keep login_ok NULL -> Unverified.
+        pool._conn.execute(
+            "UPDATE accounts_meta SET login_checked_at=? WHERE name=?",
+            (time.time(), name),
+        )
+        pool._conn.commit()
+        summary = (f"{len(parsed['cookies'])} cookies injected ({parsed['format']}), "
+                   f"warnings: {warnings}")
+        JOBS[name] = {**JOBS[name], "status": "success", "summary": summary}
+    except Exception as e:
+        JOBS[name] = {**JOBS[name], "status": "failed", "error": str(e)[:300]}
+
+
 @app.post("/api/admin/accounts", status_code=202)
 async def admin_account_add(body: AccountAdd, x_admin_key: str | None = Header(default=None)):
     _admin_auth(x_admin_key)
@@ -470,6 +519,21 @@ async def admin_account_add(body: AccountAdd, x_admin_key: str | None = Header(d
     if JOBS.get(body.name, {}).get("status") == "running":
         raise HTTPException(409, "add job running")
     asyncio.create_task(_run_add_job(body.name, body.email, body.password, body.totp))
+    return {"ok": True, "job": "running"}
+
+
+@app.post("/api/admin/cookies", status_code=202)
+async def admin_cookie_add(body: CookieAddRequest,
+                           x_admin_key: str | None = Header(default=None)):
+    """Registers an account by pasting cookies (JSON / Netscape / header string)."""
+    _admin_auth(x_admin_key)
+    if not NAME_RE.match(body.name):
+        raise HTTPException(400, "invalid account name")
+    if body.name in pool.accounts:
+        raise HTTPException(409, "account exists")
+    if JOBS.get(body.name, {}).get("status") == "running":
+        raise HTTPException(409, "cookie job running")
+    asyncio.create_task(_run_cookie_job(body.name, body.cookie))
     return {"ok": True, "job": "running"}
 
 

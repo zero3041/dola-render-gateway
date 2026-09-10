@@ -71,6 +71,13 @@ td .prompt{display:block;max-width:340px;overflow:hidden;text-overflow:ellipsis;
 .video-wrap{display:flex;gap:8px;align-items:center}
 .tiny{font-size:12px;color:var(--sub)}
 .account-id{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;color:#52615d;font-weight:600}
+.cookie-badge{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;background:#fff7e6;color:#b76e00;white-space:nowrap}
+.dialog textarea{width:100%;min-height:150px;padding:9px 12px;border:1px solid var(--line);border-radius:8px;font-size:13px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;resize:vertical;box-sizing:border-box}
+.cookie-preview{background:#f7faf9;border:1px solid var(--line);border-radius:8px;padding:10px 12px;margin-top:8px;font-size:12px;color:var(--sub);max-height:130px;overflow:auto}
+.cookie-preview .ok{color:#00945f}
+.cookie-preview .warn{color:#c77a00}
+.cookie-preview .err{color:#c03237}
+.cookie-preview b{color:var(--text)}
 </style>
 </head>
 <body>
@@ -111,7 +118,10 @@ td .prompt{display:block;max-width:340px;overflow:hidden;text-overflow:ellipsis;
     <div class="card">
       <div class="toolbar">
         <h3 style="margin:0">Account List</h3>
-        <button class="btn btn-p" onclick="openAddAccount()">＋ Add Account</button>
+        <div>
+          <button class="btn" style="margin-right:8px" onclick="openAddCookie()">＋ Add Cookie</button>
+          <button class="btn btn-p" onclick="openAddAccount()">＋ Add Account</button>
+        </div>
       </div>
       <div id="accountsTable"></div>
     </div>
@@ -222,7 +232,11 @@ async function loadDash(){
   );
 }
 
-function accLabel(x){return x.email?`<div>${esc(x.email)}</div>`:'<span class="tiny">No Email</span>';}
+function accLabel(x){
+  if(!x.email)return '<span class="tiny">No Email</span>';
+  if(x.email.startsWith('cookie:'))return `<div>${esc(x.email.slice('cookie:'.length))} cookies <span class="cookie-badge">Cookie</span></div>`;
+  return `<div>${esc(x.email)}</div>`;
+}
 function statusBadge(a){
   if(a.busy)return '<span class="badge b-blue">Generating</span>';
   if(a.rate_limited)return '<span class="badge b-orange">Rate limited until '+fmt(a.rate_limited_until)+'</span>';
@@ -250,12 +264,16 @@ async function loadAccounts(){
     const jb=jobs[x.name];
     const badge=(jb&&jb.kind==='add'&&jb.status==='running')?'<span class="badge b-blue">Adding</span>'
       :(jb&&jb.kind==='add'&&jb.status==='failed')?'<span class="badge b-red">Add Failed</span>'
+      :(jb&&jb.kind==='cookie'&&jb.status==='running')?'<span class="badge b-blue">Adding Cookie</span>'
+      :(jb&&jb.kind==='cookie'&&jb.status==='failed')?'<span class="badge b-red">Cookie Failed</span>'
       :statusBadge(x);
     const warn=(jb&&jb.status==='failed')?' <span class="tiny" title="'+esc(jb.error)+'">⚠</span>':'';
+    const cookies=((x.email||'').startsWith('cookie:'))?x.email.slice(7):'-';
     return [
       `<span class="account-id">${esc(x.name)}</span>`,
       accLabel(x)+warn,
       badge,
+      cookies,
       `<label class="sw"><input type="checkbox" ${x.scheduling?'checked':''} onchange="setSched('${x.name}',this.checked)"><i></i></label>`,
       `<b>${x.used_today}</b> / ${x.limit}`,
       fmt(x.last_used_at),
@@ -263,7 +281,7 @@ async function loadAccounts(){
       `<button class="btn" style="margin-right:6px" onclick="verify('${x.name}',this)">Verify</button><button class="btn btn-danger" onclick="delAccount('${x.name}')">Delete</button>`
     ];
   });
-  q('#accountsTable').innerHTML=table(['Account ID','Name','Status','Dispatch','Remaining','Last Used','Created At','Actions'],rows);
+  q('#accountsTable').innerHTML=table(['Account ID','Name','Cookies','Status','Dispatch','Remaining','Last Used','Created At','Actions'],rows);
 }
 
 async function verify(name,btn){
@@ -292,6 +310,64 @@ async function submitAddAccount(){
   const body={name:q('#f_name').value.trim(),email:q('#f_email').value.trim(),password:q('#f_pass').value,totp:q('#f_totp').value.trim()};
   if(!body.name||!body.email||!body.password)return alert('Please enter account name, email and password');
   try{await api('/api/admin/accounts',{method:'POST',body});}catch(e){return alert(e.message);}
+  hide('dlg');refresh();
+}
+
+/* ---- Add Cookie ---- */
+function openAddCookie(){
+  let def='acc_cookie';try{const n=document.querySelectorAll('#accountsTable tbody tr').length;def='acc_cookie'+(n+1);}catch(e){}
+  showDlg(`<h2>Add Account by Cookie</h2>
+    <label>Account Name</label><input id="fc_name" value="${def}">
+    <label>Cookie (JSON array / Netscape / header string)</label>
+    <textarea id="fc_cookie" placeholder="Paste dola.com cookies here..." oninput="cookiePreview()"></textarea>
+    <div id="fc_preview"></div>
+    <div class="row"><button class="btn" onclick="hide('dlg')">Cancel</button><button class="btn btn-p" onclick="submitCookieAdd()">Add Account</button></div>`);
+}
+function cookieDolaDomain(d){return !d||d.replace(/^\.+/,'').split('.').slice(-2).join('.')==='dola.com';}
+function cookiePreview(){
+  const raw=q('#fc_cookie').value;
+  const box=q('#fc_preview');
+  if(!raw.trim()){box.innerHTML='';return;}
+  const parsed=parseCookieJS(raw);
+  if(parsed.errors&&parsed.errors.length){box.innerHTML='<div class="err"><b>Parse error:</b>'+esc(parsed.errors[0])+'</div>';return;}
+  const cookies=parsed.cookies.filter(c=>cookieDolaDomain(c.domain||'dola.com'));
+  const names=cookies.map(c=>c.name);
+  const missed=!names.includes('sessionid');
+  const warnMs=!names.includes('msToken'),warnFp=!names.includes('s_v_web_id');
+  let html=`<div class="${missed?'err':'ok'}"><b>${cookies.length}</b> dola.com cookie(s) parsed (${esc(parsed.format||'')})</div>`;
+  if(missed)html+='<div class="err">Missing required <b>sessionid</b> — session may not work.</div>';
+  if(warnMs)html+='<div class="warn">Missing optional <b>msToken</b> (will continue, may affect stability).</div>';
+  if(warnFp)html+='<div class="warn">Missing optional <b>s_v_web_id</b>.</div>';
+  if(cookies.length)html+='<div class="tiny">'+esc(cookies.slice(0,6).map(c=>c.name+'='+(c.value||'').slice(0,12)).join(', '))+'...</div>';
+  box.innerHTML=html;
+}
+function parseCookieJS(raw){
+  raw=(raw||'').trim();
+  if(!raw)return{cookies:[],format:'none'};
+  // 1) JSON array
+  try{const d=JSON.parse(raw);if(Array.isArray(d)){
+    return{cookies:d.filter(o=>o&&o.name!=null).map(o=>({name:o.name,value:o.value||'',domain:o.domain,doladomain:true})),format:'json'};
+  }}catch(e){}
+  // 2) Netscape cookie file
+  if(/\t/.test(raw)&&/^(#HttpOnly_)?(.+\t){5}/m.test(raw)){
+    const cookies=[];
+    raw.split(/\r?\n/).forEach(l=>{const t=l.trim();if(!t||(t.startsWith('#')&&!t.startsWith('#HttpOnly_')))return;const m=t.match(/^(?:#HttpOnly_)?([^\t]+)\t(TRUE|FALSE)\t([^\t]*)\t(TRUE|FALSE)\t-?\d+\t([^\t]+)\t(.*)$/);if(m) cookies.push({name:m[5],value:m[6],domain:m[1],doladomain:true});});
+    return{cookies,format:'netscape'};
+  }
+  // 3) Header string
+  const out=[];raw.split(';').forEach(p=>{const i=p.indexOf('=');if(i>0)out.push({name:p.slice(0,i).trim(),value:p.slice(i+1).trim(),domain:'dola.com',doladomain:true});});
+  return{cookies:out,format:'header'};
+}
+async function submitCookieAdd(){
+  const name=q('#fc_name').value.trim();
+  const raw=q('#fc_cookie').value.trim();
+  if(!name)return alert('Please enter account name');
+  if(!raw)return alert('Please paste cookie content first');
+  const parsed=parseCookieJS(raw);
+  const cookies=(parsed.cookies||[]).filter(c=>cookieDolaDomain(c.domain||'dola.com'));
+  if(!cookies.some(c=>c.name==='sessionid'))return alert('Cookie is missing required sessionid. Please export fresh dola.com cookies and try again.');
+  try{await api('/api/admin/cookies',{method:'POST',body:{name,cookie:raw}});}
+  catch(e){return alert(e.message);}
   hide('dlg');refresh();
 }
 
